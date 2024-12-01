@@ -1,0 +1,296 @@
+---
+title: "Rejection Sampling"
+output: html_document
+---
+
+```{r}
+library(aplore3)
+data <- polypharm
+data$gender <- ifelse(polypharm$gender=="Male",1,0)
+data$racewhite <- ifelse(polypharm$race=="White",1,0)
+data$MHV1 <- ifelse(polypharm$mhv4=="1-5",1,0)
+data$MHV2 <- ifelse(polypharm$mhv4=="6-14",1,0)
+data$MHV3 <- ifelse(polypharm$mhv4=="> 14",1,0)
+data$INPTMHV <- ifelse(polypharm$inptmhv3=="0",0,1)
+library(dplyr)
+data <- select(data, select=c(gender, racewhite, age, MHV1, MHV2, MHV3, INPTMHV))
+colnames(data) <- c("gender", "racewhite", "age", "MHV1", "MHV2", "MHV3", "INPTMHV")
+polypharmacy <- ifelse(polypharm$polypharmacy=="Yes",1,0)
+```
+
+
+```{r}
+model<-glm(polypharm$polypharmacy~gender+racewhite+age+MHV1+MHV2+MHV3+INPTMHV,family= binomial, data = data)
+summary(model)
+```
+
+```{r}
+# Logit function
+logit <- function(p) {
+  log(p / (1 - p))
+}
+
+# Logistic function
+inv_logit <- function(x) {
+  exp(x) / (1 + exp(x))
+}
+
+# Log-likelihood function
+log_likelihood <- function(beta, u, sigma_u) {
+  #beta <- beta[1,]
+  #u <- u[1,]
+  #sigma_u <- sigma_u_init
+  log_lik <- 0
+  for (n in 1:3500) {
+    eta <- sum(data[n, ] * beta[2:8]) + beta[1] + u[polypharm$id[n]]
+    p <- inv_logit(eta)
+    if(p<-10000) return (0)
+    log_lik <- log_lik + polypharmacy[n] * log(p) + (1 - polypharmacy[n]) * log(1 - p)
+  }
+  #log_lik <- log_lik - sum(u^2) / (2 * sigma_u^2)
+  return(log_lik)
+}
+
+# Prior function
+log_prior <- function(beta, sigma_u) {
+  sum(dnorm(beta, 0, 10, log = TRUE)) + dnorm(sigma_u, 0, 10, log = TRUE)
+}
+
+# Posterior function
+log_posterior <- function(beta, u, sigma_u) {
+  log_prior(beta, sigma_u) + log_likelihood(beta, u, sigma_u)
+}
+```
+
+
+```{r}
+set.seed(1234)
+# Metropolis-Hastings algorithm
+metropolis_hastings <- function(iter, beta_init, u_init, sigma_u_init, proposal_sd) {
+  # Initialize variables
+  #
+  beta <- matrix(NA, nrow = iter, ncol = length(beta_init))
+  u <- matrix(NA, nrow = iter, ncol = length(u_init))
+  sigma_u <- matrix(NA, nrow = iter, ncol = length(sigma_u_init))
+  beta[1, ] <- beta_init
+  u[1, ] <- u_init
+  sigma_u[1, ] <- sigma_u_init
+  lpnow <- log_posterior(beta_init, u_init, sigma_u_init)
+  
+  #proposal_sd <- 10
+  for (t in 2:iter) {
+    print(t)
+    # Propose new values
+    beta_prop <- beta[t-1, ] + rnorm(length(beta_init), 0, proposal_sd)
+    sigma_u_prop <- sigma_u[t-1, ] + rnorm(1, 0, proposal_sd)
+    u_prop <- rnorm(500,0,exp(sigma_u_prop))
+    lplast <- lpnow
+    lpnow <- log_posterior(beta_prop, u_prop, sigma_u_prop)
+    # Compute acceptance probability
+    log_alpha <- lpnow-lplast
+    
+    alpha <- exp(log_alpha)
+    
+    # Accept or reject proposal
+    if (runif(1) < alpha) {
+      beta[t, ] <- beta_prop
+      u[t, ] <- u_prop
+      sigma_u[t, ] <- sigma_u_prop
+    } else {
+      beta[t, ] <- beta[t-1, ]
+      u[t, ] <- u[t-1, ]
+      sigma_u[t] <- sigma_u[t-1]
+    }
+  }
+  
+  return(list(beta = beta, u = u, sigma_u = sigma_u))
+}
+
+# Set initial values and parameters
+J <- 500
+beta_init <- model$coefficients
+sigma_u_init <- rnorm(1,0,10)
+u_init <- rnorm(J,0,exp(sigma_u_init))
+proposal_sd <- 0.1
+iter <- 50
+
+# Run Metropolis-Hastings algorithm
+results <- metropolis_hastings(iter, beta_init, u_init, sigma_u_init, proposal_sd)
+
+# Extract samples
+beta_samples <- results$beta
+u_samples <- results$u
+sigma_u_samples <- results$sigma_u
+
+
+
+```
+
+
+```{r}
+write.csv(results,file = "results.csv")
+
+```
+
+以下代码用于检查是否收敛: 
+
+```{r}
+library(coda)
+
+results<-read.csv("results.csv")
+beta_samples <- cbind(results$beta.1,results$beta.2,results$beta.3,results$beta.4,results$beta.5,results$beta.6,results$beta.7,results$beta.8)
+# Define a function to plot trace plot, acf plot, and R statistic
+```
+
+```{r}
+plot_mcmc_diagnostic <- function(beta_samples) {
+  # Extract MCMC samples
+  
+  #u_samples <- results$u
+  #sigma_u_samples <- results$sigma_u
+  
+  par(mfrow=c(3,3))
+  # Trace plot
+  for (param in 1:ncol(beta_samples)) {
+      plot(beta_samples[, param], type = "l", ylab = paste("beta[", param, "]"), col = "blue")
+  }
+  
+  par(mfrow=c(3,3))
+  # ACF plot
+  for (param in 1:ncol(beta_samples)) {
+      acf(beta_samples[, param], main = paste("ACF of beta[", param, "] "), col = "blue",xlim=c(1,50))
+  }
+  
+  par(mfrow=c(3,3))
+  # histogram plot
+  for (param in 1:ncol(beta_samples)) {
+      hist(beta_samples[, param], main = paste("Histogram of beta[", param, "] "), col = "blue")
+  }
+  # Gelman-Rubin statistic
+  #gr_diag_beta <- gelman.diag(beta_samples)
+  #gr_diag_u <- gelman.diag(u_samples)
+  #gr_diag_sigma_u <- gelman.diag(sigma_u_samples)
+  
+  #cat("Gelman-Rubin diagnostics for beta:\n")
+  #print(gr_diag_beta)
+  #cat("\nGelman-Rubin diagnostics for u:\n")
+  #print(gr_diag_u)
+  #cat("\nGelman-Rubin diagnostics for sigma_u:\n")
+  #print(gr_diag_sigma_u)
+}
+
+# Run the function with your MCMC results
+iter <- 2500
+beta_samples <- beta_samples[(iter/2+1):iter,]
+plot_mcmc_diagnostic(beta_samples)
+```
+
+
+```{r}
+metropolis_hastings_multiple <- function(iter, beta_init, u_init, sigma_u_init, proposal_sd) {
+  set.seed(1234)
+  # Number of chains
+  num_chains <- 4
+  cold_chains <- 3
+  hot_chain <- 1
+  
+  # Initialize variables
+  beta <- array(NA, dim = c(iter, length(beta_init), num_chains))
+  u <- array(NA, dim = c(iter, length(u_init), num_chains))
+  sigma_u <- array(NA, dim = c(iter, length(sigma_u_init), num_chains))
+  
+  for (chain in 1:num_chains) {
+    beta[1, , chain] <- beta_init
+    u[1, , chain] <- u_init
+    sigma_u[1, , chain] <- sigma_u_init
+  }
+  
+  lpnow <- sapply(1:num_chains, function(chain) log_posterior(beta_init, u_init, sigma_u_init))
+  lplast <- lpnow
+  for (t in 2:iter) {
+    print(t)
+    for (chain in 1:num_chains) {
+      # Propose new values
+      beta_prop <- beta[t-1, , chain] + rnorm(length(beta_init), 0, proposal_sd)
+      sigma_u_prop <- sigma_u[t-1, , chain] + rnorm(1, 0, proposal_sd)
+      u_prop <- rnorm(500, 0, exp(sigma_u_prop))
+      
+      lplast[chain] <- lpnow[chain]
+      lpnow[chain] <- log_posterior(beta_prop, u_prop, sigma_u_prop)
+      
+      # Compute acceptance probability
+      log_alpha <- lpnow[chain] - lplast[chain]
+      
+      # Adjust acceptance probability for the hot chain
+      if (chain == hot_chain) {
+        log_alpha <- log_alpha / 2
+      }
+      
+      alpha <- exp(log_alpha)
+      
+      # Accept or reject proposal
+      if (runif(1) < alpha) {
+        beta[t, , chain] <- beta_prop
+        u[t, , chain] <- u_prop
+        sigma_u[t, , chain] <- sigma_u_prop
+      } else {
+        beta[t, , chain] <- beta[t-1, , chain]
+        u[t, , chain] <- u[t-1, , chain]
+        sigma_u[t, , chain] <- sigma_u[t-1, , chain]
+      }
+    }
+  }
+  
+  return(list(beta = beta, u = u, sigma_u = sigma_u))
+}
+
+# Set initial values and parameters
+J <- 500
+beta_init <- model$coefficients
+sigma_u_init <- rnorm(1, 0, 10)
+u_init <- rnorm(J, 0, exp(sigma_u_init))
+proposal_sd <- 10
+iter <- 1000
+
+# Run Metropolis-Hastings algorithm
+results <- metropolis_hastings_multiple(iter, beta_init, u_init, sigma_u_init, proposal_sd)
+
+for(chain in 1:4) plot_mcmc_diagnostic(results$beta[, ,chain])
+
+```
+
+判断是否收敛：
+
+```{r}
+# 假设结果存在 results$beta[, , chain] 中，n 是结果的迭代次数
+
+half_n <- ceiling(iter / 2)
+
+# 提取后半部分结果
+converged_results <- results$beta[(half_n+1):iter, , ]
+
+# 计算每个参数的平均值
+chain_means <- apply(converged_results, 2, function(x) colMeans(x))
+
+# 计算每个参数的全局平均值
+overall_means <- colMeans(chain_means)
+
+# 计算每个参数在每条链上的方差
+chain_vars <- apply(converged_results, 3, var)
+
+# 计算每个参数的全局方差
+overall_vars <- colMeans(chain_vars)
+
+# 计算收敛因子
+potential_scale_reduction <- sqrt(overall_vars / chain_vars)
+
+# 判断MCMC是否收敛
+if (all(potential_scale_reduction < 1.1)) {
+  print("MCMC收敛")
+} else {
+  print("MCMC未收敛")
+}
+
+
+
+```
